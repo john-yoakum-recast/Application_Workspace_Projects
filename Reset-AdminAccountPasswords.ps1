@@ -11,11 +11,11 @@
 
 #>
 param (
-    $UserAccountA,
-    $UserAccountB,
-    $UserAccountAPreviousPassword,
-    $UserAccountANewPassword,
-    $UserAccountBNewPassword,
+    [string]$UserAccountA,
+    [string]$UserAccountB,
+    [string]$UserAccountAPreviousPassword,
+    [string]$UserAccountANewPassword,
+    [string]$UserAccountBNewPassword,
     $LiquitURI = 'https://liquit.corp.viamonstra.com'
 )
 
