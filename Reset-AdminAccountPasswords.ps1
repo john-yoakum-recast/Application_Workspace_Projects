@@ -16,7 +16,7 @@ param (
     [string]$UserAccountAPreviousPassword,
     [string]$UserAccountANewPassword,
     [string]$UserAccountBNewPassword,
-    $LiquitURI = 'https://liquit.corp.viamonstra.com'
+    [string]$LiquitURI = 'https://liquit.corp.viamonstra.com'
 )
 
 if (-not (Get-Module -ListAvailable -Name Liquit.Server.PowerShell)) {
