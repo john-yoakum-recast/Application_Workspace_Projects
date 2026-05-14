@@ -34,7 +34,7 @@ param (
   [string]$logPath = "C:\Windows\Temp",
   [switch]$UseDeviceTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
   [switch]$UseCertificate = $true,
-  [String]$AgentURL = "https://download.liquit.com/release/4.4/4174/Liquit-Universal-Agent-Win-4.4.4174.8323.exe"
+  [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe"
 )
 
 ######################
