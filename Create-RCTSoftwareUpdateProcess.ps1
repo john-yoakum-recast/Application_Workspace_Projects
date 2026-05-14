@@ -1,4 +1,4 @@
-﻿<#
+<#
     .SYNOPSIS
     Script to query ConfigMgr Environment and then automatically create a Software Update Process in RCT Patching
 
@@ -17,10 +17,10 @@
     .\Create-RCTSoftwareUpdateProcess.ps1
 
     .NOTES
-    Version:       1.0
+    Version:       1.1
     Author:        John Yoakum, Recast Software
     Creation Date: 05/12/2026
-    Purpose/Change: Initial script development
+    Purpose/Change: Updated code to be more dynamic in finding the right Service Connection, also added the ability to add the option to patch only minor versions
 #>
 param(
     $CMSQLServer = 'demo-mecm.demo.recastsoftware.com', # Enter your ConfigMgr SQL Server FQDN
@@ -28,7 +28,8 @@ param(
     $RMSServer = "https://demo-rms-dev.demo.recastsoftware.com:444", # Enter your FQDN of your RMS Server
     $RMSSQLServer = 'demo-rms-dev.demo.recastsoftware.com', # Enter the fqdn of your RMS Database Host
     $RMSDB = 'RecastManagementServer', # Enter the name of your RMS Database
-    $patchingProcessName = "Synced Matching Updates" # Enter what you would like to name the Software Update Process
+    $patchingProcessName = "Synced Matching Updates", # Enter what you would like to name the Software Update Process
+    [switch]$AllowMinorUpgrades = $true
 )
 
 Import-Module SQLServer
@@ -410,6 +411,28 @@ Invoke-Sqlcmd `
 
 Write-Host "Created patching process: $patchingProcessName [$patchingProcessId]"
 
+# Get Integration Id for Type 2
+$integration = Invoke-Sqlcmd `
+    -ServerInstance $RMSSQLServer `
+    -Database $RMSDB `
+    -Query "SELECT TOP 1 [Id] FROM [AM].[Integrations] WHERE [Type] = 2" `
+    -TrustServerCertificate
+
+if (-not $integration -or -not $integration.Id) {
+    throw "No integration found in [AM].[Integrations] where Type = 2."
+}
+
+$integrationId = $integration.Id
+
+Write-Host "Using IntegrationId: $integrationId"
+
+# Add settings for minor version if chosen
+
+If ($AllowMinorUpgrades) {
+    $Settings = '{"AllowOnlyMinorVersionUpgrades":true}'
+} else {
+    $Settings = $null
+}
 # Insert the connection to the Service Connection
 
 $integrationSql = @"
@@ -422,13 +445,13 @@ INSERT INTO [AM].[IntegrationPatchingProcesses]
            ,[StatusMessage]
            ,[Settings])
      VALUES
-           (2
+           ($integrationId
            ,'$patchingProcessId'
            ,'Paused'
            ,null
            ,null
            ,null
-           ,null)
+           ,'$Settings')
 "@
 
 Invoke-Sqlcmd `
