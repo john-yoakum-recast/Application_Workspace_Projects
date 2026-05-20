@@ -33,8 +33,8 @@ param(
     $csvFile = $false,
     [int]$MaxCandidates = 200,
     [double]$AutoMatchThreshold = 95.0,
-    [double]$StrongReviewThreshold = 85.0,
-    [double]$PossibleReviewThreshold = 75.0
+    [double]$StrongReviewThreshold = 75.0,
+    [double]$PossibleReviewThreshold = 65.0
 )
 
 Import-Module SQLServer
