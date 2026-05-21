@@ -34,7 +34,7 @@ param(
     [int]$MaxCandidates = 200,
     [double]$AutoMatchThreshold = 95.0,
     [double]$StrongReviewThreshold = 75.0,
-    [double]$PossibleReviewThreshold = 65.0
+    [double]$PossibleReviewThreshold = 50.0
 )
 
 Import-Module SQLServer
