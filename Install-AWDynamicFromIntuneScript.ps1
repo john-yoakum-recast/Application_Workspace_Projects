@@ -21,10 +21,10 @@
     .\Install-AWDynamicFromIntuneScript.ps1
 
     .NOTES
-    Version:       1.0
+    Version:       1.3
     Author:        John Yoakum, Recast Software
-    Creation Date: 01/23/2026
-    Purpose/Change: Initial script development
+    Creation Date: 05/24/2026
+    Purpose/Change: Tweaked the script to put all variables necessary at the top and available as parameters.
 #>
 
 param (
@@ -34,7 +34,9 @@ param (
   [string]$logPath = "C:\Windows\Temp",
   [switch]$UseDeviceTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
   [switch]$UseCertificate = $true,
-  [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe"
+  [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe",
+  $ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
+  $identitySource = "AzureAD" # Enter the name of your Identity Source for SSO.
 )
 
 ######################
@@ -46,7 +48,6 @@ $InstallerArguments = ''
 $DestinationPath = "C:\InstallFiles"
 $InstallerPath = "C:\InstallFiles\AgentBootstrapper.exe"
 $AgentPath = "C:\InstallFiles\Agent.exe"
-$ZoneURL = "https://john.liquit.com"
 
 # Create destination directory
 If (!(Test-Path $DestinationPath)) {  
@@ -178,7 +179,7 @@ $jsonData = @{
     login = @{
         enabled = $true
         sso = $true
-        identitySource = "AzureAD"
+        identitySource = $identitySource
         timeout = 4
     }
     log = @{
