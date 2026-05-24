@@ -35,8 +35,8 @@ param (
   [switch]$UseDeviceTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
   [switch]$UseCertificate = $true,
   [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe",
-  $ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
-  $identitySource = "AzureAD" # Enter the name of your Identity Source for SSO.
+  [string]$ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
+  [string]$identitySource = "AzureAD" # Enter the name of your Identity Source for SSO.
 )
 
 ######################
