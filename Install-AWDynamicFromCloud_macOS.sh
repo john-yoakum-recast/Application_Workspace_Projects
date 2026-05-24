@@ -26,6 +26,7 @@ DestinationPath="$HOME/InstallFiles"
 InstallerPath="$DestinationPath/AgentBootstrapper"
 AgentPath="$DestinationPath/Agent.pkg"
 ZoneURL="https://john.liquit.com"
+identitySource="AzureAD"
 appName="Liquit.app"
 appPath="/Applications/$appName"
 
@@ -95,7 +96,7 @@ cat <<EOF >"$jsonFilePath"
   "login": {
     "enabled": true,
     "sso": true,
-    "identitySource": "AzureAD",
+    "identitySource": "$identitySource",
     "timeout": 4
   },
   "log": {
