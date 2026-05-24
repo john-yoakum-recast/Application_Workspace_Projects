@@ -32,7 +32,7 @@ param (
   [switch]$StartDeployment = $true,
   [string]$deployment = "Autopilot - ThinKiosk (Testing)", # name of default deployment to run
   [string]$logPath = "C:\Windows\Temp",
-  [switch]$UseDeviceTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
+  [switch]$UseGroupTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
   [switch]$UseCertificate = $true,
   [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe",
   [string]$ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
@@ -86,7 +86,7 @@ ei45VTaOrbp/pS8ddLxncu+5xsFlnkCaODJ89dgmA8Iwndmt9FtN5ulP0lNUwEwVMfdMMr5TIopU
 
 }
 
-If ($UseDeviceTags) {
+If ($UseGroupTags) {
     # Define the device name to search for
     $deviceName = "$env:COMPUTERNAME"
 
