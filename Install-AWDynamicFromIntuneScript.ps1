@@ -36,7 +36,11 @@ param (
   [switch]$UseCertificate = $true,
   [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe",
   [string]$ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
-  [string]$identitySource = "AzureAD" # Enter the name of your Identity Source for SSO.
+  [string]$identitySource = "AzureAD", # Enter the name of your Identity Source for SSO.
+  # Define the Azure App Registration details
+  [string]$clientId = "2e4e0a31-3cd0-4c3b-b418-b2eca4a9b7e9",  #Client ID
+  [string]$tenantId = "d37cd50c-80c6-4fd2-9be2-6b24ff526332",  #Directory ID
+  [string]$clientSecret = "6Bf8Q~hqoywoDvC8uZwp2IpNRq0WF1c_Mb7aodjp" #Client Secret
 )
 
 ######################
@@ -83,11 +87,6 @@ ei45VTaOrbp/pS8ddLxncu+5xsFlnkCaODJ89dgmA8Iwndmt9FtN5ulP0lNUwEwVMfdMMr5TIopU
 }
 
 If ($UseDeviceTags) {
-    # Define the Azure App Registration details
-    $clientId = "2e4e0a31-3cd0-4c3b-b418-b2eca4a9b7e9"  #Client ID
-    $tenantId = "d37cd50c-80c6-4fd2-9be2-6b24ff526332"  #Directory ID
-    $clientSecret = "6Bf8Q~hqoywoDvC8uZwp2IpNRq0WF1c_Mb7aodjp" #Client Secret
-
     # Define the device name to search for
     $deviceName = "$env:COMPUTERNAME"
 
