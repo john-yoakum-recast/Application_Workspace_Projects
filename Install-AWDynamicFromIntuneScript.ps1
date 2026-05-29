@@ -179,7 +179,7 @@ $jsonData = @{
         enabled = $true
         sso = $true
         identitySource = $identitySource
-        timeout = 4
+        timeout = 15
     }
     log = @{
         level = "Debug"
