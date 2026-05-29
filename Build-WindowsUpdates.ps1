@@ -319,8 +319,8 @@ foreach ($item in $searchCriteria) {
 }
 
 ForEach ($updateAvailable in $UpdatesAvailable) {
-    #Create-UpdatePackage -Update $updateAvailable
+    Create-UpdatePackage -Update $updateAvailable
 }
 
 
-$UpdatesAvailable
+#$UpdatesAvailable
