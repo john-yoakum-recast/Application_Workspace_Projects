@@ -11,6 +11,6 @@ $ScheduledTasks = "Synchronize Windows Apps","Synchronize Mac Apps"
 Connect-LiquitWorkspace -URI $LiquitURI -Credential $credentials
 
 ForEach ($ScheduledTask in $ScheduledTasks) {
-    $CurrentTask = Get-LiquitScheduleTask -Name "$ScheduledTask"
+    $CurrentTask = Get-LiquitScheduledTask -Name "$ScheduledTask"
     Start-LiquitScheduledTask -ScheduledTask $CurrentTask
 }
