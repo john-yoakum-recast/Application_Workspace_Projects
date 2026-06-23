@@ -21,10 +21,10 @@
     .\Install-AWDynamicFromIntuneScript.ps1
 
     .NOTES
-    Version:       1.3
+    Version:       1.4
     Author:        John Yoakum, Recast Software
     Creation Date: 05/24/2026
-    Purpose/Change: Tweaked the script to put all variables necessary at the top and available as parameters.
+    Purpose/Change: Added the ability to not have to restart the device during autopilot.
 #>
 
 param (
