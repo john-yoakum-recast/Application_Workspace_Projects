@@ -242,7 +242,14 @@ if (Test-Path -Path $InstallerPath) {
    try {
 
        Start-Process -FilePath $InstallerPath -ArgumentList $InstallerArguments -Wait
-
+       $processName = "userhost"
+       Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force
+       $serviceName = "LiquitUniversalAgent"
+       $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+       if ($svc -and $svc.Status -eq 'Running') {
+           Restart-Service -Name $serviceName -Force
+       }
+       
        Exit 0
 
    } catch {
