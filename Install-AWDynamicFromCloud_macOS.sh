@@ -131,7 +131,7 @@ cat <<EOF >"$jsonFilePath"
     "cancel": false,
     "triggers": true,
     "autoStart": {
-      "enabled": true,
+      "enabled": $StartDeployment,
       "deployment": "$deployment",
       "timer": 0
     }
