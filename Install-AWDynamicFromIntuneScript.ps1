@@ -34,7 +34,7 @@ param (
   [string]$logPath = "C:\Windows\Temp",
   [switch]$UseGroupTags = $false, # if using device tags, you will modify the section below to have a more dynamic selection of deployments
   [switch]$UseCertificate = $true,
-  [String]$AgentURL = "https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Win-4.4.4225.7279.exe",
+  [String]$AgentURL = "https://download.liquit.com/release/4.4/4286/Liquit-Universal-Agent-Win-4.4.4286.6140.exe",
   [string]$ZoneURL = "https://john.liquit.com", # Enter your zoneURL here.
   [string]$identitySource = "AzureAD", # Enter the name of your Identity Source for SSO.
   # Define the Azure App Registration details
