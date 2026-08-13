@@ -115,6 +115,7 @@ cat <<EOF >"$jsonFilePath"
   "launcher": {
     "enabled": true,
     "state": "Default",
+	"start": "Auto",
     "tiles": false,
     "minimal": false,
     "contextMenu": true,
