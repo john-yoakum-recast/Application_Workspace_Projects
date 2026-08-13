@@ -102,9 +102,7 @@ cat <<EOF >"$jsonFilePath"
   "log": {
     "level": "Debug",
     "agentPath": "Agent.log",
-    "userHostPath": "UserHost.log",
-    "rotateCount": 5,
-    "rotateSize": 1048576
+    "userHostPath": "UserHost.log"
   },
   "registration": {
     "type": "Certificate"
