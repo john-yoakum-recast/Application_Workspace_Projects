@@ -107,11 +107,6 @@ cat <<EOF >"$jsonFilePath"
   "registration": {
     "type": "Certificate"
   },
-  "nativeIcons": {
-    "enabled": true,
-    "primary": true,
-    "startMenuPath": "\${Programs}"
-  },
   "launcher": {
     "enabled": true,
     "state": "Default",
