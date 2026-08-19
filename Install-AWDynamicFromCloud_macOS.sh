@@ -28,7 +28,7 @@ set -euo pipefail
 
 BootstrapperURL="https://download.liquit.com/extra/Bootstrapper/AgentBootstrapper-Mac-4.4.4130.3708"
 
-StartDeployment=false
+StartDeployment=true
 deployment="Mac Base Apps"
 logPath="/tmp"
 UseCertificate=true
@@ -42,7 +42,7 @@ CertificatePath="$DestinationPath/AgentRegistration.cer"
 jsonFilePath="$DestinationPath/Agent.json"
 
 ZoneURL="https://AppWorkspace-lmigov.msappproxy.us"
-identitySource="LMI Mac"
+identitySource="Provisioning"
 
 appName="Liquit.app"
 appPath="/Applications/$appName"
