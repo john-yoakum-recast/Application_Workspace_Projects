@@ -61,7 +61,7 @@ If (!(Test-Path $DestinationPath)) {
 If ($StartDeployment) {$InstallerArguments += " --startDeployment --wait"}
 If ($logPath) {$InstallerArguments += " --logPath $($logPath)"}
 If ($UseCertificate) {
-    $InstallerArguments += " --certificate C:\InstallFiles\AgentRegistration.cer"
+    $InstallerArguments += " --certificate C:\InstallFiles\AgentRegistration.cer --registrationType Certificate"
     # Replace the below with your certificate for Device Registration
     $Certificate = @"
 -----BEGIN CERTIFICATE-----
@@ -220,6 +220,7 @@ $jsonData = @{
         }
 
     }
+    userHostStartupOperatingMode = "Background"
 }
 
 $jsonString = $jsonData | ConvertTo-Json -Depth 10
