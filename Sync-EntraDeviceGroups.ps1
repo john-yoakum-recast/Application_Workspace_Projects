@@ -9,6 +9,13 @@
 
     This script does not require the Microsoft.Graph PowerShell module.
 
+    App Registration Permissions
+    | Permission             | Why it's needed                                                             |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `Group.Read.All`       | Read all Entra groups so the UI can enumerate groups.                       |
+| `GroupMember.Read.All` | Read members of the selected groups.                                        |
+| `Device.Read.All`      | Read device objects and retrieve properties such as `id` and `displayName`. |
+
 .PARAMETER UseSaved
     Processes groups stored in selected-groups.json and skips the UI.
 
