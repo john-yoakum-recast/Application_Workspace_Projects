@@ -1,46 +1,25 @@
-﻿<#
+<#
 .SYNOPSIS
-    Synchronizes device members of selected Microsoft Entra ID groups
-    to Application Workspace device collections.
+    Synchronizes device members of selected Microsoft Entra ID groups to
+    Application Workspace device collections by using direct Microsoft Graph REST calls.
 
 .DESCRIPTION
-    The script enumerates Entra ID groups and presents a UI for selecting
-    groups to synchronize.
+    Interactive mode displays all Entra groups in a WPF selection window. Selected groups
+    are saved to selected-groups.json. Use -UseSaved to skip the UI on later runs.
 
-    Selected groups are saved to selected-groups.json. Subsequent runs can
-    use -UseSaved to bypass the UI.
-
-    Performance optimizations:
-      - Uses Get-MgGroupMemberAsDevice so only device members are returned.
-      - Loads Application Workspace devices once.
-      - Creates case-insensitive lookup tables for Application Workspace devices.
-      - Uses ArrayList objects to store mutable collections.
-      - Uses HashSet objects for fast membership comparisons.
-      - Does not query every group's members while building the UI.
-      - Avoids repeated Get-LiquitDevice -Search calls.
-      - Requests only required properties from Microsoft Graph.
-
-    Required Microsoft Graph application permissions:
-      - GroupMember.Read.All
-      - Group.Read.All
-      - Device.Read.All
-
-    Directory.Read.All can also provide the needed directory read access,
-    but use the least-privileged permissions appropriate for your environment.
+    This script does not require the Microsoft.Graph PowerShell module.
 
 .PARAMETER UseSaved
-    Skips the UI and processes groups stored in selected-groups.json.
+    Processes groups stored in selected-groups.json and skips the UI.
 
-.EXAMPLE
-    .\Sync-EntraDeviceGroups.ps1
-
-.EXAMPLE
-    .\Sync-EntraDeviceGroups.ps1 -UseSaved
+.PARAMETER UseTransitiveMembers
+    Includes device members found through nested groups. The default is direct membership.
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$UseSaved
+    [switch]$UseSaved,
+    [switch]$UseTransitiveMembers
 )
 
 Set-StrictMode -Version 3.0
@@ -50,85 +29,67 @@ $ErrorActionPreference = 'Stop'
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Microsoft Entra ID application registration
-$TenantId     = 'tenantID'
-$ClientId     = 'ApplicationID'
-$ClientSecret = 'CLIENTSecret'
+$TenantId     = 'TENANT-ID'
+$ClientId     = 'APPLICATION-ID'
+$ClientSecret = 'CLIENT-SECRET'
 
-# Application Workspace access
 $LiquitURI      = 'https://zone.fqdn.com'
 $LiquitUsername = 'local\SERVICEACCOUNT'
-$LiquitPassword = 'SERVICEACCOUNTPASSWORD'
+$LiquitPassword = 'SERVICE-ACCOUNT-PASSWORD'
 
-# Saved group selection
 $SavedGroupsFile = Join-Path -Path $PSScriptRoot -ChildPath 'selected-groups.json'
+$GraphBaseUri = 'https://graph.microsoft.com/v1.0'
+$TokenBaseUri = 'https://login.microsoftonline.com'
+$GraphMaximumRetryCount = 5
+$GraphDefaultRetryDelaySeconds = 5
+$GraphTokenRefreshBufferMinutes = 5
 
 # ---------------------------------------------------------------------------
-# Credentials
+# Credentials and script-level state
 # ---------------------------------------------------------------------------
 
-$SecureClientSecret = ConvertTo-SecureString `
-    -String $ClientSecret `
-    -AsPlainText `
-    -Force
-
-$GraphCredential = [System.Management.Automation.PSCredential\]::new(
-    $ClientId,
-    $SecureClientSecret
-)
-
-$SecureLiquitPassword = ConvertTo-SecureString `
-    -String $LiquitPassword `
-    -AsPlainText `
-    -Force
-
-$LiquitCredential = [System.Management.Automation.PSCredential\]::new(
+$SecureLiquitPassword = ConvertTo-SecureString -String $LiquitPassword -AsPlainText -Force
+$LiquitCredential = [System.Management.Automation.PSCredential]::new(
     $LiquitUsername,
     $SecureLiquitPassword
 )
 
-# ---------------------------------------------------------------------------
-# Script-level collections and lookup tables
-# ---------------------------------------------------------------------------
-
-# Mutable list containing all Application Workspace devices.
-$script:AllDevices = [System.Collections.ArrayList\]::new()
-
-# Case-insensitive device-name lookup.
-$script:DevicesByName =
-    [System.Collections.Generic.Dictionary[string, object]\]::new(
-        [System.StringComparer\]::OrdinalIgnoreCase
-    )
+$script:GraphAccessToken = $null
+$script:GraphTokenExpiresUtc = [datetime]::MinValue
+$script:AllAWDevices = [System.Collections.ArrayList]::new()
+$script:AWDevicesByName = [System.Collections.Generic.Dictionary[string, object]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# General helpers
 # ---------------------------------------------------------------------------
 
-function Get-ObjectDisplayName {
+function Get-DisplayName {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [object]$InputObject
     )
 
-    if ($InputObject.PSObject.Properties.Name -contains 'DisplayName') {
-        if (-not [string\]::IsNullOrWhiteSpace([string]$InputObject.DisplayName)) {
-            return [string]$InputObject.DisplayName
-        }
-    }
-
-    if ($InputObject.PSObject.Properties.Name -contains 'Name') {
-        if (-not [string\]::IsNullOrWhiteSpace([string]$InputObject.Name)) {
-            return [string]$InputObject.Name
+    foreach ($PropertyName in @('DisplayName', 'displayName', 'Name')) {
+        if ($InputObject.PSObject.Properties.Name -contains $PropertyName) {
+            $Value = [string]$InputObject.$PropertyName
+            if (-not [string]::IsNullOrWhiteSpace($Value)) {
+                return $Value
+            }
         }
     }
 
     if ($InputObject.PSObject.Properties.Name -contains 'AdditionalProperties') {
         $AdditionalProperties = $InputObject.AdditionalProperties
-
-        if ($null -ne $AdditionalProperties) {
-            if ($AdditionalProperties.ContainsKey('displayName')) {
-                return [string]$AdditionalProperties['displayName']
+        if (
+            $null -ne $AdditionalProperties -and
+            $AdditionalProperties.ContainsKey('displayName')
+        ) {
+            $Value = [string]$AdditionalProperties['displayName']
+            if (-not [string]::IsNullOrWhiteSpace($Value)) {
+                return $Value
             }
         }
     }
@@ -136,40 +97,288 @@ function Get-ObjectDisplayName {
     return $null
 }
 
-function Initialize-AWDeviceCache {
+function Test-Configuration {
     [CmdletBinding()]
     param()
 
-    Write-Host 'Loading Application Workspace devices...' -ForegroundColor Cyan
+    $ConfigurationErrors = [System.Collections.ArrayList]::new()
 
-    $script:AllDevices.Clear()
-    $script:DevicesByName.Clear()
+    $RequiredValues = @(
+        @{ Name = 'TenantId'; Value = $TenantId; Placeholder = 'TENANT-ID' },
+        @{ Name = 'ClientId'; Value = $ClientId; Placeholder = 'APPLICATION-ID' },
+        @{ Name = 'ClientSecret'; Value = $ClientSecret; Placeholder = 'CLIENT-SECRET' },
+        @{ Name = 'LiquitURI'; Value = $LiquitURI; Placeholder = 'https://zone.fqdn.com' },
+        @{ Name = 'LiquitUsername'; Value = $LiquitUsername; Placeholder = 'local\SERVICEACCOUNT' },
+        @{ Name = 'LiquitPassword'; Value = $LiquitPassword; Placeholder = 'SERVICE-ACCOUNT-PASSWORD' }
+    )
 
-    $LiquitDevices = @(Get-LiquitDevice)
-
-    foreach ($Device in $LiquitDevices) {
-        if ($null -eq $Device) {
-            continue
-        }
-
-        [void]$script:AllDevices.Add($Device)
-
-        $DeviceName = Get-ObjectDisplayName -InputObject $Device
-
-        if ([string\]::IsNullOrWhiteSpace($DeviceName)) {
-            continue
-        }
-
-        # If duplicate names exist, retain the first device returned.
-        if (-not $script:DevicesByName.ContainsKey($DeviceName)) {
-            $script:DevicesByName.Add($DeviceName, $Device)
+    foreach ($RequiredValue in $RequiredValues) {
+        if (
+            [string]::IsNullOrWhiteSpace([string]$RequiredValue.Value) -or
+            [string]$RequiredValue.Value -eq [string]$RequiredValue.Placeholder
+        ) {
+            [void]$ConfigurationErrors.Add(
+                "Set `$${($RequiredValue.Name)} to the correct value."
+            )
         }
     }
 
-    Write-Host (
-        'Loaded {0:N0} Application Workspace devices.' -f
-        $script:AllDevices.Count
-    ) -ForegroundColor Green
+    if ($ConfigurationErrors.Count -gt 0) {
+        throw ($ConfigurationErrors -join [Environment]::NewLine)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph authentication and requests
+# ---------------------------------------------------------------------------
+
+function Get-GraphAccessToken {
+    [CmdletBinding()]
+    param(
+        [switch]$ForceRefresh
+    )
+
+    $CurrentUtc = [datetime]::UtcNow
+    $RefreshThreshold = $script:GraphTokenExpiresUtc.AddMinutes(
+        -$GraphTokenRefreshBufferMinutes
+    )
+
+    if (
+        -not $ForceRefresh -and
+        -not [string]::IsNullOrWhiteSpace($script:GraphAccessToken) -and
+        $CurrentUtc -lt $RefreshThreshold
+    ) {
+        return $script:GraphAccessToken
+    }
+
+    $TokenUri = '{0}/{1}/oauth2/v2.0/token' -f $TokenBaseUri.TrimEnd('/'), $TenantId
+    $TokenBody = @{
+        client_id     = $ClientId
+        client_secret = $ClientSecret
+        scope         = 'https://graph.microsoft.com/.default'
+        grant_type    = 'client_credentials'
+    }
+
+    try {
+        $TokenResponse = Invoke-RestMethod `
+            -Method Post `
+            -Uri $TokenUri `
+            -Body $TokenBody `
+            -ContentType 'application/x-www-form-urlencoded' `
+            -ErrorAction Stop
+    }
+    catch {
+        throw "Microsoft Graph authentication failed: $($_.Exception.Message)"
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$TokenResponse.access_token)) {
+        throw 'Microsoft Graph authentication returned no access token.'
+    }
+
+    $ExpiresInSeconds = 3599
+    if ($null -ne $TokenResponse.expires_in) {
+        $ExpiresInSeconds = [int]$TokenResponse.expires_in
+    }
+
+    $script:GraphAccessToken = [string]$TokenResponse.access_token
+    $script:GraphTokenExpiresUtc = [datetime]::UtcNow.AddSeconds($ExpiresInSeconds)
+    return $script:GraphAccessToken
+}
+
+function Get-GraphRequestHeaders {
+    [CmdletBinding()]
+    param(
+        [switch]$ForceTokenRefresh
+    )
+
+    $AccessToken = Get-GraphAccessToken -ForceRefresh:$ForceTokenRefresh
+    return @{
+        Authorization = "Bearer $AccessToken"
+        Accept        = 'application/json'
+    }
+}
+
+function Invoke-GraphRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('GET', 'POST', 'PATCH', 'DELETE')]
+        [string]$Method,
+
+        [Parameter(Mandatory)]
+        [string]$Uri,
+
+        [object]$Body,
+        [hashtable]$AdditionalHeaders
+    )
+
+    $Attempt = 0
+    $TokenRefreshAttempted = $false
+
+    while ($Attempt -lt $GraphMaximumRetryCount) {
+        $Attempt++
+        $Headers = Get-GraphRequestHeaders
+
+        if ($null -ne $AdditionalHeaders) {
+            foreach ($HeaderName in $AdditionalHeaders.Keys) {
+                $Headers[$HeaderName] = $AdditionalHeaders[$HeaderName]
+            }
+        }
+
+        $RequestParameters = @{
+            Method      = $Method
+            Uri         = $Uri
+            Headers     = $Headers
+            ErrorAction = 'Stop'
+        }
+
+        if ($null -ne $Body) {
+            $RequestParameters.Body = $Body | ConvertTo-Json -Depth 10 -Compress
+            $RequestParameters.ContentType = 'application/json'
+        }
+
+        try {
+            return Invoke-RestMethod @RequestParameters
+        }
+        catch {
+            $StatusCode = $null
+            $RetryAfterSeconds = $GraphDefaultRetryDelaySeconds
+
+            if ($null -ne $_.Exception.Response) {
+                try {
+                    $StatusCode = [int]$_.Exception.Response.StatusCode
+                }
+                catch {
+                    $StatusCode = $null
+                }
+
+                try {
+                    $RetryAfterValue = $_.Exception.Response.Headers.RetryAfter.Delta.TotalSeconds
+                    if ($null -ne $RetryAfterValue) {
+                        $RetryAfterSeconds = [int][math]::Ceiling($RetryAfterValue)
+                    }
+                }
+                catch {
+                    try {
+                        $RetryAfterHeader = $_.Exception.Response.Headers.GetValues('Retry-After') |
+                            Select-Object -First 1
+                        if ($RetryAfterHeader -match '^\d+$') {
+                            $RetryAfterSeconds = [int]$RetryAfterHeader
+                        }
+                    }
+                    catch {
+                        $RetryAfterSeconds = $GraphDefaultRetryDelaySeconds
+                    }
+                }
+            }
+
+            if ($StatusCode -eq 401 -and -not $TokenRefreshAttempted) {
+                Write-Warning 'Microsoft Graph returned HTTP 401. Refreshing the access token.'
+                [void](Get-GraphAccessToken -ForceRefresh)
+                $TokenRefreshAttempted = $true
+                continue
+            }
+
+            if (
+                $StatusCode -in @(429, 500, 502, 503, 504) -and
+                $Attempt -lt $GraphMaximumRetryCount
+            ) {
+                if ($RetryAfterSeconds -lt 1) {
+                    $RetryAfterSeconds = $GraphDefaultRetryDelaySeconds
+                }
+
+                Write-Warning (
+                    'Microsoft Graph returned HTTP {0}. Retrying in {1} seconds. Attempt {2} of {3}.' -f
+                    $StatusCode,
+                    $RetryAfterSeconds,
+                    $Attempt,
+                    $GraphMaximumRetryCount
+                )
+                Start-Sleep -Seconds $RetryAfterSeconds
+                continue
+            }
+
+            throw (
+                'Microsoft Graph request failed. Method={0}; URI={1}; HTTP status={2}; Error={3}' -f
+                $Method,
+                $Uri,
+                $StatusCode,
+                $_.Exception.Message
+            )
+        }
+    }
+
+    throw "Microsoft Graph request exceeded the maximum retry count. URI: $Uri"
+}
+
+function Invoke-GraphPagedRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Uri,
+
+        [hashtable]$AdditionalHeaders
+    )
+
+    $Items = [System.Collections.ArrayList]::new()
+    $NextLink = $Uri
+
+    while (-not [string]::IsNullOrWhiteSpace($NextLink)) {
+        $Response = Invoke-GraphRequest `
+            -Method GET `
+            -Uri $NextLink `
+            -AdditionalHeaders $AdditionalHeaders
+
+        if (
+            $Response.PSObject.Properties.Name -contains 'value' -and
+            $null -ne $Response.value
+        ) {
+            foreach ($Item in $Response.value) {
+                [void]$Items.Add($Item)
+            }
+        }
+
+        $NextLink = $null
+        if ($Response.PSObject.Properties.Name -contains '@odata.nextLink') {
+            $NextLink = [string]$Response.'@odata.nextLink'
+        }
+    }
+
+    return $Items
+}
+
+function Get-AllEntraGroups {
+    [CmdletBinding()]
+    param()
+
+    Write-Host 'Enumerating Microsoft Entra ID groups...' -ForegroundColor Cyan
+    $Groups = [System.Collections.ArrayList]::new()
+    $InitialUri = "$GraphBaseUri/groups?`$select=id,displayName&`$top=999"
+    $GraphGroups = Invoke-GraphPagedRequest -Uri $InitialUri
+
+    foreach ($GraphGroup in $GraphGroups) {
+        if ($null -eq $GraphGroup) {
+            continue
+        }
+
+        $GroupId = [string]$GraphGroup.id
+        $GroupDisplayName = [string]$GraphGroup.displayName
+        if (
+            [string]::IsNullOrWhiteSpace($GroupId) -or
+            [string]::IsNullOrWhiteSpace($GroupDisplayName)
+        ) {
+            continue
+        }
+
+        [void]$Groups.Add([PSCustomObject]@{
+            Id          = $GroupId
+            DisplayName = $GroupDisplayName
+        })
+    }
+
+    Write-Host ('Loaded {0:N0} Microsoft Entra ID groups.' -f $Groups.Count) `
+        -ForegroundColor Green
+    return $Groups
 }
 
 function Get-EntraDeviceMembers {
@@ -179,75 +388,99 @@ function Get-EntraDeviceMembers {
         [string]$GroupId
     )
 
-    $DeviceMembers = [System.Collections.ArrayList\]::new()
-
-    # This asks Graph for device objects only.
-    $GraphDevices = @(
-        Get-MgGroupMemberAsDevice `
-            -GroupId $GroupId `
-            -Property 'id,displayName' `
-            -All
+    $DeviceMembers = [System.Collections.ArrayList]::new()
+    $EncodedGroupId = [uri]::EscapeDataString($GroupId)
+    $MembershipPath = if ($UseTransitiveMembers) { 'transitiveMembers' } else { 'members' }
+    $InitialUri = (
+        "$GraphBaseUri/groups/$EncodedGroupId/$MembershipPath/" +
+        "microsoft.graph.device?`$select=id,displayName&`$top=999"
     )
 
+    $GraphDevices = Invoke-GraphPagedRequest -Uri $InitialUri
     foreach ($GraphDevice in $GraphDevices) {
         if ($null -eq $GraphDevice) {
             continue
         }
 
-        $DeviceName = Get-ObjectDisplayName -InputObject $GraphDevice
-
-        if ([string\]::IsNullOrWhiteSpace($DeviceName)) {
+        $DeviceDisplayName = [string]$GraphDevice.displayName
+        if ([string]::IsNullOrWhiteSpace($DeviceDisplayName)) {
             continue
         }
 
-        $DeviceRecord = [PSCustomObject]@{
-            Id          = [string]$GraphDevice.Id
-            DisplayName = $DeviceName
-        }
-
-        [void]$DeviceMembers.Add($DeviceRecord)
+        [void]$DeviceMembers.Add([PSCustomObject]@{
+            Id          = [string]$GraphDevice.id
+            DisplayName = $DeviceDisplayName
+        })
     }
 
     return $DeviceMembers
 }
 
-function Get-OrCreateAWDeviceCollection {
+# ---------------------------------------------------------------------------
+# Application Workspace cache and collection helpers
+# ---------------------------------------------------------------------------
+
+function Initialize-AWDeviceCache {
+    [CmdletBinding()]
+    param()
+
+    Write-Host 'Loading Application Workspace devices...' -ForegroundColor Cyan
+    $script:AllAWDevices.Clear()
+    $script:AWDevicesByName.Clear()
+
+    foreach ($Device in @(Get-LiquitDevice)) {
+        if ($null -eq $Device) {
+            continue
+        }
+
+        [void]$script:AllAWDevices.Add($Device)
+        $DeviceName = Get-DisplayName -InputObject $Device
+        if ([string]::IsNullOrWhiteSpace($DeviceName)) {
+            continue
+        }
+
+        if (-not $script:AWDevicesByName.ContainsKey($DeviceName)) {
+            $script:AWDevicesByName.Add($DeviceName, $Device)
+        }
+    }
+
+    Write-Host ('Loaded {0:N0} Application Workspace devices.' -f $script:AllAWDevices.Count) `
+        -ForegroundColor Green
+}
+
+function Confirm-AWDeviceCollection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$CollectionName
     )
 
-    $Matches = @(Get-LiquitDeviceCollection -Search $CollectionName)
-
-    # Prefer an exact, case-insensitive name match.
-    $CurrentCollection = $Matches |
+    $CollectionSearchResults = @(Get-LiquitDeviceCollection -Search $CollectionName)
+    $CurrentCollection = $CollectionSearchResults |
         Where-Object {
-            [string\]::Equals(
+            [string]::Equals(
                 [string]$_.Name,
                 $CollectionName,
-                [System.StringComparison\]::OrdinalIgnoreCase
+                [System.StringComparison]::OrdinalIgnoreCase
             )
         } |
         Select-Object -First 1
 
     if ($null -eq $CurrentCollection) {
         Write-Host "Creating collection: $CollectionName" -ForegroundColor Yellow
-
         $CreatedCollection = New-LiquitDeviceCollection -Name $CollectionName
 
         if ($null -ne $CreatedCollection) {
             $CurrentCollection = $CreatedCollection
         }
         else {
-            $Matches = @(Get-LiquitDeviceCollection -Search $CollectionName)
-
-            $CurrentCollection = $Matches |
+            $CollectionSearchResults = @(Get-LiquitDeviceCollection -Search $CollectionName)
+            $CurrentCollection = $CollectionSearchResults |
                 Where-Object {
-                    [string\]::Equals(
+                    [string]::Equals(
                         [string]$_.Name,
                         $CollectionName,
-                        [System.StringComparison\]::OrdinalIgnoreCase
+                        [System.StringComparison]::OrdinalIgnoreCase
                     )
                 } |
                 Select-Object -First 1
@@ -271,111 +504,67 @@ function Update-AWCollection {
     $GroupId = [string]$Group.Id
     $GroupDisplayName = [string]$Group.DisplayName
 
-    if ([string\]::IsNullOrWhiteSpace($GroupId)) {
-        throw 'The supplied group does not contain an Id.'
+    if ([string]::IsNullOrWhiteSpace($GroupId)) {
+        throw 'The supplied group does not contain an ID.'
     }
-
-    if ([string\]::IsNullOrWhiteSpace($GroupDisplayName)) {
-        throw "The group '$GroupId' does not contain a DisplayName."
+    if ([string]::IsNullOrWhiteSpace($GroupDisplayName)) {
+        throw "The group '$GroupId' does not contain a display name."
     }
 
     Write-Host ''
     Write-Host "Processing group: $GroupDisplayName" -ForegroundColor Cyan
     Write-Host "Group ID: $GroupId" -ForegroundColor DarkGray
+    Write-Host (if ($UseTransitiveMembers) { 'Membership scope: transitive' } else { 'Membership scope: direct' }) `
+        -ForegroundColor DarkGray
 
-    # -----------------------------------------------------------------------
-    # Get Entra device members
-    # -----------------------------------------------------------------------
-
-    $EntraDevices = [System.Collections.ArrayList\]::new()
-
-    $RetrievedDevices = Get-EntraDeviceMembers -GroupId $GroupId
-
-    foreach ($RetrievedDevice in $RetrievedDevices) {
-        [void]$EntraDevices.Add($RetrievedDevice)
-    }
-
-    # HashSet provides fast case-insensitive membership checks.
-    $EntraDeviceNames =
-        [System.Collections.Generic.HashSet[string]\]::new(
-            [System.StringComparer\]::OrdinalIgnoreCase
-        )
+    $EntraDevices = Get-EntraDeviceMembers -GroupId $GroupId
+    $EntraDeviceNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
 
     foreach ($EntraDevice in $EntraDevices) {
-        if (-not [string\]::IsNullOrWhiteSpace($EntraDevice.DisplayName)) {
-            [void]$EntraDeviceNames.Add([string]$EntraDevice.DisplayName)
+        $DeviceName = [string]$EntraDevice.DisplayName
+        if (-not [string]::IsNullOrWhiteSpace($DeviceName)) {
+            [void]$EntraDeviceNames.Add($DeviceName)
         }
     }
 
-    Write-Host (
-        'Entra device members found: {0:N0}' -f $EntraDeviceNames.Count
-    )
+    Write-Host ('Microsoft Entra device members found: {0:N0}' -f $EntraDeviceNames.Count)
+    $CurrentCollection = Confirm-AWDeviceCollection -CollectionName $GroupDisplayName
+    $CurrentCollectionMembers = [System.Collections.ArrayList]::new()
 
-    # -----------------------------------------------------------------------
-    # Get or create Application Workspace collection
-    # -----------------------------------------------------------------------
-
-    $CurrentCollection = Get-OrCreateAWDeviceCollection `
-        -CollectionName $GroupDisplayName
-
-    # -----------------------------------------------------------------------
-    # Get current Application Workspace collection membership
-    # -----------------------------------------------------------------------
-
-    $CurrentCollectionMembers = [System.Collections.ArrayList\]::new()
-
-    $RetrievedCollectionMembers = @(
-        Get-LiquitDeviceCollectionMember `
-            -DeviceCollection $CurrentCollection
-    )
-
-    foreach ($CollectionMember in $RetrievedCollectionMembers) {
-        if ($null -eq $CollectionMember) {
-            continue
+    foreach ($CollectionMember in @(
+        Get-LiquitDeviceCollectionMember -DeviceCollection $CurrentCollection
+    )) {
+        if ($null -ne $CollectionMember) {
+            [void]$CurrentCollectionMembers.Add($CollectionMember)
         }
-
-        [void]$CurrentCollectionMembers.Add($CollectionMember)
     }
 
-    $CurrentCollectionMemberNames =
-        [System.Collections.Generic.HashSet[string]\]::new(
-            [System.StringComparer\]::OrdinalIgnoreCase
-        )
-
-    $CurrentCollectionMemberByName =
-        [System.Collections.Generic.Dictionary[string, object]\]::new(
-            [System.StringComparer\]::OrdinalIgnoreCase
-        )
+    $CurrentCollectionMemberNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $CurrentCollectionMemberByName = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
 
     foreach ($CollectionMember in $CurrentCollectionMembers) {
-        $MemberName = Get-ObjectDisplayName -InputObject $CollectionMember
-
-        if ([string\]::IsNullOrWhiteSpace($MemberName)) {
+        $MemberName = Get-DisplayName -InputObject $CollectionMember
+        if ([string]::IsNullOrWhiteSpace($MemberName)) {
             continue
         }
 
         [void]$CurrentCollectionMemberNames.Add($MemberName)
-
         if (-not $CurrentCollectionMemberByName.ContainsKey($MemberName)) {
-            $CurrentCollectionMemberByName.Add(
-                $MemberName,
-                $CollectionMember
-            )
+            $CurrentCollectionMemberByName.Add($MemberName, $CollectionMember)
         }
     }
 
-    Write-Host (
-        'Current collection members: {0:N0}' -f
-        $CurrentCollectionMemberNames.Count
-    )
+    Write-Host ('Current collection members: {0:N0}' -f $CurrentCollectionMemberNames.Count)
 
-    # -----------------------------------------------------------------------
-    # Calculate differences
-    # -----------------------------------------------------------------------
-
-    $DevicesToAdd    = [System.Collections.ArrayList\]::new()
-    $DevicesToRemove = [System.Collections.ArrayList\]::new()
-    $MissingAWDevices = [System.Collections.ArrayList\]::new()
+    $DevicesToAdd = [System.Collections.ArrayList]::new()
+    $DevicesToRemove = [System.Collections.ArrayList]::new()
+    $MissingAWDevices = [System.Collections.ArrayList]::new()
 
     foreach ($ExistingName in $CurrentCollectionMemberNames) {
         if (-not $EntraDeviceNames.Contains($ExistingName)) {
@@ -388,7 +577,7 @@ function Update-AWCollection {
             continue
         }
 
-        if ($script:DevicesByName.ContainsKey($EntraName)) {
+        if ($script:AWDevicesByName.ContainsKey($EntraName)) {
             [void]$DevicesToAdd.Add($EntraName)
         }
         else {
@@ -403,31 +592,23 @@ function Update-AWCollection {
         $MissingAWDevices.Count
     )
 
-    # -----------------------------------------------------------------------
-    # Remove devices no longer in Entra group
-    # -----------------------------------------------------------------------
-
     foreach ($DeviceName in $DevicesToRemove) {
         $CurrentDevice = $null
 
-        # Prefer the global Application Workspace cache.
-        if ($script:DevicesByName.ContainsKey($DeviceName)) {
-            $CurrentDevice = $script:DevicesByName[$DeviceName]
+        if ($script:AWDevicesByName.ContainsKey($DeviceName)) {
+            $CurrentDevice = $script:AWDevicesByName[$DeviceName]
         }
         elseif ($CurrentCollectionMemberByName.ContainsKey($DeviceName)) {
-            # The collection-member object might itself be accepted by the cmdlet.
             $CurrentDevice = $CurrentCollectionMemberByName[$DeviceName]
         }
         else {
-            # Last-resort search for unusual/stale collection entries.
-            $SearchResults = @(Get-LiquitDevice -Search $DeviceName)
-
-            $CurrentDevice = $SearchResults |
+            $DeviceSearchResults = @(Get-LiquitDevice -Search $DeviceName)
+            $CurrentDevice = $DeviceSearchResults |
                 Where-Object {
-                    [string\]::Equals(
+                    [string]::Equals(
                         [string]$_.Name,
                         [string]$DeviceName,
-                        [System.StringComparison\]::OrdinalIgnoreCase
+                        [System.StringComparison]::OrdinalIgnoreCase
                     )
                 } |
                 Select-Object -First 1
@@ -444,158 +625,34 @@ function Update-AWCollection {
         Remove-LiquitDeviceCollectionMember `
             -DeviceCollection $CurrentCollection `
             -Device $CurrentDevice
-
-        Write-Host (
-            "Removed $DeviceName from $GroupDisplayName"
-        ) -ForegroundColor Yellow
+        Write-Host "Removed $DeviceName from $GroupDisplayName" -ForegroundColor Yellow
     }
 
-    # -----------------------------------------------------------------------
-    # Add newly assigned devices
-    # -----------------------------------------------------------------------
-
     foreach ($DeviceName in $DevicesToAdd) {
-        $CurrentDevice = $script:DevicesByName[$DeviceName]
-
+        $CurrentDevice = $script:AWDevicesByName[$DeviceName]
         Add-LiquitDeviceCollectionMember `
             -DeviceCollection $CurrentCollection `
             -Device $CurrentDevice
-
-        Write-Host (
-            "Added $DeviceName to $GroupDisplayName"
-        ) -ForegroundColor Green
+        Write-Host "Added $DeviceName to $GroupDisplayName" -ForegroundColor Green
     }
 
     if ($MissingAWDevices.Count -gt 0) {
         Write-Warning (
-            '{0:N0} Entra devices were not found in Application Workspace ' +
-            'and could not be added to collection "{1}".'
-        ) -f $MissingAWDevices.Count, $GroupDisplayName
+            '{0:N0} Entra devices were not found in Application Workspace and could not be added to collection "{1}".' -f
+            $MissingAWDevices.Count,
+            $GroupDisplayName
+        )
     }
 
     return [PSCustomObject]@{
-        GroupId               = $GroupId
-        GroupName             = $GroupDisplayName
-        EntraDeviceCount      = $EntraDeviceNames.Count
-        ExistingMemberCount   = $CurrentCollectionMemberNames.Count
-        AddedCount            = $DevicesToAdd.Count
-        RemovedCount          = $DevicesToRemove.Count
-        MissingAWDeviceCount  = $MissingAWDevices.Count
+        GroupId              = $GroupId
+        GroupName            = $GroupDisplayName
+        EntraDeviceCount     = $EntraDeviceNames.Count
+        ExistingMemberCount  = $CurrentCollectionMemberNames.Count
+        AddedCount           = $DevicesToAdd.Count
+        RemovedCount         = $DevicesToRemove.Count
+        MissingAWDeviceCount = $MissingAWDevices.Count
     }
-}
-
-function Get-AllEntraGroups {
-    [CmdletBinding()]
-    param()
-
-    Write-Host 'Enumerating Entra ID groups...' -ForegroundColor Cyan
-
-    $Groups = [System.Collections.ArrayList\]::new()
-
-    $GraphGroups = @(
-        Get-MgGroup `
-            -All `
-            -Property 'id,displayName,groupTypes,securityEnabled'
-    )
-
-    foreach ($GraphGroup in $GraphGroups) {
-        if ($null -eq $GraphGroup) {
-            continue
-        }
-
-        if ([string\]::IsNullOrWhiteSpace([string]$GraphGroup.DisplayName)) {
-            continue
-        }
-
-        $GroupRecord = [PSCustomObject]@{
-            Id              = [string]$GraphGroup.Id
-            DisplayName     = [string]$GraphGroup.DisplayName
-            GroupTypes      = $GraphGroup.GroupTypes
-            SecurityEnabled = $GraphGroup.SecurityEnabled
-        }
-
-        [void]$Groups.Add($GroupRecord)
-    }
-
-    Write-Host (
-        'Loaded {0:N0} Entra ID groups.' -f $Groups.Count
-    ) -ForegroundColor Green
-
-    return $Groups
-}
-
-function Save-SelectedGroups {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [System.Collections.IEnumerable]$Groups,
-
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    $GroupsToSave = [System.Collections.ArrayList\]::new()
-
-    foreach ($Group in $Groups) {
-        $SavedGroup = [PSCustomObject]@{
-            Id          = [string]$Group.Id
-            DisplayName = [string]$Group.DisplayName
-        }
-
-        [void]$GroupsToSave.Add($SavedGroup)
-    }
-
-    # -InputObject prevents a one-item ArrayList from being written as a
-    # single JSON object instead of an array.
-    ConvertTo-Json `
-        -InputObject $GroupsToSave `
-        -Depth 4 |
-        Set-Content `
-            -Path $Path `
-            -Encoding UTF8
-}
-
-function Get-SavedGroups {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Saved groups file not found: $Path"
-    }
-
-    $RawJson = Get-Content `
-        -LiteralPath $Path `
-        -Raw
-
-    if ([string\]::IsNullOrWhiteSpace($RawJson)) {
-        return [System.Collections.ArrayList\]::new()
-    }
-
-    $ParsedGroups = @($RawJson | ConvertFrom-Json)
-    $SavedGroups = [System.Collections.ArrayList\]::new()
-
-    foreach ($Group in $ParsedGroups) {
-        if ($null -eq $Group) {
-            continue
-        }
-
-        if ([string\]::IsNullOrWhiteSpace([string]$Group.Id)) {
-            Write-Warning 'A saved group entry was skipped because it has no Id.'
-            continue
-        }
-
-        $SavedGroup = [PSCustomObject]@{
-            Id          = [string]$Group.Id
-            DisplayName = [string]$Group.DisplayName
-        }
-
-        [void]$SavedGroups.Add($SavedGroup)
-    }
-
-    return $SavedGroups
 }
 
 function Invoke-GroupSynchronization {
@@ -605,15 +662,20 @@ function Invoke-GroupSynchronization {
         [System.Collections.IEnumerable]$Groups
     )
 
-    $Results = [System.Collections.ArrayList\]::new()
+    $Results = [System.Collections.ArrayList]::new()
+    $Failures = [System.Collections.ArrayList]::new()
 
     foreach ($Group in $Groups) {
         try {
-            $Result = Update-AWCollection -Group $Group
-            [void]$Results.Add($Result)
+            [void]$Results.Add((Update-AWCollection -Group $Group))
         }
         catch {
-            Write-Error (
+            [void]$Failures.Add([PSCustomObject]@{
+                GroupId   = [string]$Group.Id
+                GroupName = [string]$Group.DisplayName
+                Error     = $_.Exception.Message
+            })
+            Write-Warning (
                 "Failed to synchronize group '$($Group.DisplayName)' " +
                 "($($Group.Id)): $($_.Exception.Message)"
             )
@@ -635,21 +697,99 @@ function Invoke-GroupSynchronization {
         )
     }
 
-    return $Results
+    if ($Failures.Count -gt 0) {
+        Write-Warning ('{0:N0} group synchronizations failed.' -f $Failures.Count)
+    }
+
+    return [PSCustomObject]@{
+        Successful = $Results
+        Failed     = $Failures
+    }
 }
 
 # ---------------------------------------------------------------------------
-# Connect
+# Saved group functions
 # ---------------------------------------------------------------------------
 
-Write-Host 'Connecting to Microsoft Graph...' -ForegroundColor -ForegroundColor Cyan
+function Save-SelectedGroups {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Groups,
 
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $GroupsToSave = [System.Collections.ArrayList]::new()
+    foreach ($Group in $Groups) {
+        [void]$GroupsToSave.Add([PSCustomObject]@{
+            Id          = [string]$Group.Id
+            DisplayName = [string]$Group.DisplayName
+        })
+    }
+
+    ConvertTo-Json -InputObject $GroupsToSave -Depth 4 |
+        Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Get-SavedGroups {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Saved groups file not found: $Path"
+    }
+
+    $SavedGroups = [System.Collections.ArrayList]::new()
+    $RawJson = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($RawJson)) {
+        return $SavedGroups
+    }
+
+    foreach ($Group in @($RawJson | ConvertFrom-Json)) {
+        if ($null -eq $Group) {
+            continue
+        }
+
+        $GroupId = [string]$Group.Id
+        if ([string]::IsNullOrWhiteSpace($GroupId)) {
+            Write-Warning 'A saved group entry was skipped because it has no ID.'
+            continue
+        }
+
+        $GroupDisplayName = [string]$Group.DisplayName
+        if ([string]::IsNullOrWhiteSpace($GroupDisplayName)) {
+            $GroupDisplayName = $GroupId
+        }
+
+        [void]$SavedGroups.Add([PSCustomObject]@{
+            Id          = $GroupId
+            DisplayName = $GroupDisplayName
+        })
+    }
+
+    return $SavedGroups
+}
+
+# ---------------------------------------------------------------------------
+# Validate, authenticate, and connect
+# ---------------------------------------------------------------------------
+
+Test-Configuration
+Write-Host 'Authenticating to Microsoft Graph...' -ForegroundColor Cyan
+[void](Get-GraphAccessToken)
+Write-Host 'Microsoft Graph authentication succeeded.' -ForegroundColor Green
+
+Write-Host 'Connecting to Application Workspace...' -ForegroundColor Cyan
 Connect-LiquitWorkspace `
     -URI $LiquitURI `
     -Credential $LiquitCredential `
     -ErrorAction Stop
 
-# Load this once for the entire run.
 Initialize-AWDeviceCache
 
 # ---------------------------------------------------------------------------
@@ -658,40 +798,29 @@ Initialize-AWDeviceCache
 
 if ($UseSaved) {
     $SavedGroups = Get-SavedGroups -Path $SavedGroupsFile
-
     if ($SavedGroups.Count -eq 0) {
         Write-Warning "Saved groups file is empty: $SavedGroupsFile"
         return
     }
 
-    Write-Host ''
     Write-Host (
-        'Running in -UseSaved mode. Loaded {0:N0} groups from {1}' -f
+        'Running in saved-group mode. Loaded {0:N0} groups from {1}' -f
         $SavedGroups.Count,
         $SavedGroupsFile
     ) -ForegroundColor Cyan
 
-    foreach ($Group in $SavedGroups) {
-        Write-Host (
-            ' - {0} ({1})' -f $Group.DisplayName, $Group.Id
-        )
-    }
-
-    Invoke-GroupSynchronization -Groups $SavedGroups
-
-    Write-Host ''
+    [void](Invoke-GroupSynchronization -Groups $SavedGroups)
     Write-Host 'Completed processing saved groups.' -ForegroundColor Green
     return
 }
 
 # ---------------------------------------------------------------------------
-# Interactive mode
+# Interactive WPF mode
 # ---------------------------------------------------------------------------
 
-$DeviceGroups = Get-AllEntraGroups
-
-if ($DeviceGroups.Count -eq 0) {
-    Write-Warning 'No Entra ID groups were returned.'
+$EntraGroups = Get-AllEntraGroups
+if ($EntraGroups.Count -eq 0) {
+    Write-Warning 'No Microsoft Entra ID groups were returned.'
     return
 }
 
@@ -709,7 +838,6 @@ Add-Type -AssemblyName PresentationFramework
     ResizeMode="CanResize"
     Background="#FF2D2D30"
     WindowStartupLocation="CenterScreen">
-
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -717,22 +845,19 @@ Add-Type -AssemblyName PresentationFramework
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-
         <TextBlock
             Grid.Row="0"
-            Text="Select the Entra groups to synchronize with Application Workspace device collections:"
+            Text="Select Entra groups to synchronize with Application Workspace device collections:"
             Foreground="White"
             FontSize="14"
             Margin="6"/>
-
         <TextBlock
             Grid.Row="1"
-            Text="Member counts are not loaded here because retrieving them for every group significantly slows the initial group list."
+            Text="Member counts are not loaded because querying every group would delay the initial list."
             Foreground="#FFBEBEBE"
             FontSize="12"
             TextWrapping="Wrap"
             Margin="6,0,6,6"/>
-
         <ListBox
             Grid.Row="2"
             Name="GroupList"
@@ -742,33 +867,14 @@ Add-Type -AssemblyName PresentationFramework
             ScrollViewer.VerticalScrollBarVisibility="Auto"
             VirtualizingStackPanel.IsVirtualizing="True"
             VirtualizingStackPanel.VirtualizationMode="Recycling"/>
-
         <StackPanel
             Grid.Row="3"
             Orientation="Horizontal"
             HorizontalAlignment="Right"
             Margin="6">
-
-            <Button
-                Name="RefreshButton"
-                Width="100"
-                Height="30"
-                Margin="4"
-                Content="Refresh"/>
-
-            <Button
-                Name="SaveSelection"
-                Width="140"
-                Height="30"
-                Margin="4"
-                Content="Save &amp; Continue"/>
-
-            <Button
-                Name="CancelButton"
-                Width="100"
-                Height="30"
-                Margin="4"
-                Content="Cancel"/>
+            <Button Name="RefreshButton" Width="100" Height="30" Margin="4" Content="Refresh"/>
+            <Button Name="SaveSelection" Width="140" Height="30" Margin="4" Content="Save &amp; Continue"/>
+            <Button Name="CancelButton" Width="100" Height="30" Margin="4" Content="Cancel"/>
         </StackPanel>
     </Grid>
 </Window>
@@ -776,13 +882,12 @@ Add-Type -AssemblyName PresentationFramework
 
 $Reader = [System.Xml.XmlNodeReader]::new($Xaml)
 $Window = [Windows.Markup.XamlReader]::Load($Reader)
+$GroupList = $Window.FindName('GroupList')
+$RefreshButton = $Window.FindName('RefreshButton')
+$SaveButton = $Window.FindName('SaveSelection')
+$CancelButton = $Window.FindName('CancelButton')
 
-$GroupList  = $Window.FindName('GroupList')
-$RefreshBtn = $Window.FindName('RefreshButton')
-$SaveBtn    = $Window.FindName('SaveSelection')
-$CancelBtn  = $Window.FindName('CancelButton')
-
-function Populate-GroupList {
+function Update-GroupList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -793,47 +898,35 @@ function Populate-GroupList {
     )
 
     $TargetList.Items.Clear()
-
     foreach ($Group in ($Groups | Sort-Object -Property DisplayName)) {
         $CheckBox = [System.Windows.Controls.CheckBox]::new()
         $CheckBox.Content = $Group.DisplayName
         $CheckBox.Tag = $Group
         $CheckBox.Foreground = [System.Windows.Media.Brushes]::White
         $CheckBox.Margin = [System.Windows.Thickness]::new(2, 2, 2, 2)
-
         [void]$TargetList.Items.Add($CheckBox)
     }
 }
 
-Populate-GroupList `
-    -TargetList $GroupList `
-    -Groups $DeviceGroups
+Update-GroupList -TargetList $GroupList -Groups $EntraGroups
 
-# ---------------------------------------------------------------------------
-# UI events
-# ---------------------------------------------------------------------------
-
-$RefreshBtn.Add_Click({
-    $RefreshBtn.IsEnabled = $false
-    $SaveBtn.IsEnabled = $false
+$RefreshButton.Add_Click({
+    $RefreshButton.IsEnabled = $false
+    $SaveButton.IsEnabled = $false
 
     try {
         $RefreshedGroups = Get-AllEntraGroups
-
         if ($RefreshedGroups.Count -eq 0) {
             [void][System.Windows.MessageBox]::Show(
-                'No Entra ID groups were returned.',
+                'No Microsoft Entra ID groups were returned.',
                 'Information',
                 'OK',
                 'Information'
             )
-
             return
         }
 
-        Populate-GroupList `
-            -TargetList $GroupList `
-            -Groups $RefreshedGroups
+        Update-GroupList -TargetList $GroupList -Groups $RefreshedGroups
     }
     catch {
         [void][System.Windows.MessageBox]::Show(
@@ -844,18 +937,17 @@ $RefreshBtn.Add_Click({
         )
     }
     finally {
-        $RefreshBtn.IsEnabled = $true
-        $SaveBtn.IsEnabled = $true
+        $RefreshButton.IsEnabled = $true
+        $SaveButton.IsEnabled = $true
     }
 })
 
-$SaveBtn.Add_Click({
+$SaveButton.Add_Click({
     $SelectedGroups = [System.Collections.ArrayList]::new()
-
     foreach ($Item in $GroupList.Items) {
         if (
             $Item -is [System.Windows.Controls.CheckBox] -and
-            $Item.IsChecked -eq $true
+            $Item.IsChecked
         ) {
             [void]$SelectedGroups.Add($Item.Tag)
         }
@@ -868,14 +960,11 @@ $SaveBtn.Add_Click({
             'OK',
             'Warning'
         )
-
         return
     }
 
     try {
-        Save-SelectedGroups `
-            -Groups $SelectedGroups `
-            -Path $SavedGroupsFile
+        Save-SelectedGroups -Groups $SelectedGroups -Path $SavedGroupsFile
     }
     catch {
         [void][System.Windows.MessageBox]::Show(
@@ -884,7 +973,6 @@ $SaveBtn.Add_Click({
             'OK',
             'Error'
         )
-
         return
     }
 
@@ -892,10 +980,15 @@ $SaveBtn.Add_Click({
     $Window.Close()
 
     try {
-        Invoke-GroupSynchronization -Groups $SelectedGroups
-
+        $SynchronizationResult = Invoke-GroupSynchronization -Groups $SelectedGroups
+        $CompletionMessage = (
+            "Processing complete.`n`n" +
+            "Successful groups: $($SynchronizationResult.Successful.Count)`n" +
+            "Failed groups: $($SynchronizationResult.Failed.Count)`n`n" +
+            "Selection saved to:`n$SavedGroupsFile"
+        )
         [void][System.Windows.MessageBox]::Show(
-            "Processing complete.`n`nSelection saved to:`n$SavedGroupsFile",
+            $CompletionMessage,
             'Done',
             'OK',
             'Information'
@@ -911,7 +1004,7 @@ $SaveBtn.Add_Click({
     }
 })
 
-$CancelBtn.Add_Click({
+$CancelButton.Add_Click({
     $Window.DialogResult = $false
     $Window.Close()
 })
