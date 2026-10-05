@@ -9,7 +9,7 @@
 
     This script does not require the Microsoft.Graph PowerShell module.
 
-    App Registration Permissions
+    App Registration Permissions - Application Permissions to MS Graph
     | Permission             | Why it's needed                                                             |
 | ---------------------- | --------------------------------------------------------------------------- |
 | `Group.Read.All`       | Read all Entra groups so the UI can enumerate groups.                       |
