@@ -35,10 +35,10 @@ param(
     [switch]$SelectProcessFilterPackages = $true,
     [switch]$CreateCollections = $true,
     [switch]$CreateEntitlements = $true,
-    [switch]$CreateDesktopIcons = $true,
-    [switch]$CreateStartMenuIcons = $true,
-    [string]$LiquitURL = 'https://chrisa.recastsoftware.cloud',
-    [string]$Username = 'LOCAL\aw.api',
+    [switch]$CreateDesktopIcons = $false,
+    [switch]$CreateStartMenuIcons = $false,
+    [string]$LiquitURL = 'https://john.recastsoftware.cloud',
+    [string]$Username = 'LOCAL\admin',
     [pscredential]$Credential,
     [string]$TakeOverPackageName = 'Take Over Applicationsv2',
     [string]$SnapshotName = 'Take Over',
@@ -171,7 +171,7 @@ foreach ($Package in $AllPackages) {
                 # split across 'directory' + 'name'. Join only when a directory exists
                 # so Join-Path does not throw on an empty -Path.
                 if ([string]::IsNullOrWhiteSpace($directory)) {
-                    $filePath = $name
+                    #$filePath = $name
                 }
                 else {
                     $filePath = Join-Path -Path $directory -ChildPath $name
@@ -205,7 +205,8 @@ foreach ($Package in $AllPackages) {
                     DisplayName = $displayName
                     PathToFile  = $directory
                     FileName    = $processName
-                    FullPath    = [string]$filePath
+                    #FullPath    = [string]$filePath
+                    FullPath    = [string]$directory + $processName
                     Managed     = $Managed
                 }
                 [void]$TakeOverCommands.Add($NewPackage)
@@ -443,8 +444,11 @@ foreach ($Command in $TakeOverCommands) {
                         group = $identity.ID
                     } -Context Server
                     $UserFilterSet = New-LiquitFilterSet -Action $AddUserAction
-                    $UserFilter = New-LiquitFilter -FilterSet $UserFilterSet -Type 'packageinstalled' -Settings @{ title = "$($CurrentPackage.Name)"; value = "$($CurrentPackage.ID)" } -Value '0'
-                    $null = New-LiquitAttribute -Entity $UserFilter -Id 'package' -Link $CurrentPackage
+                    # Here is where we need to change the filter so that it works correctly.
+                    Write-Host "$($Command.FullPath)"
+                    #$UserFilter = New-LiquitFilter -FilterSet $UserFilterSet -Type 'packageinstalled' -Settings @{ title = "$($CurrentPackage.Name)"; value = "$($CurrentPackage.ID)" } -Value '0'
+                    $UserFilter = New-LiquitFilter -FilterSet $UserFilterSet -Type fileexists -Settings @{ path = "$($Command.FullPath)" } -Value 'true'
+                    #$null = New-LiquitAttribute -Entity $UserFilter -Id 'package' -Link $CurrentPackage
                     [void]$existingActionNames.Add($memberActionName)
                     Write-Log INFO "Created '$memberActionName'."
                 }
