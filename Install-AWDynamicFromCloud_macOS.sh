@@ -33,7 +33,7 @@ deployment="Mac Base Apps"
 logPath="/tmp"
 UseCertificate=true
 
-AgentURL="https://download.liquit.com/release/4.4/4225/Liquit-Universal-Agent-Mac-4.4.4225.7279.pkg"
+AgentURL="https://download.liquit.com/release/4.5/4418/Liquit-Universal-Agent-Mac-4.5.4418.6133.pkg"
 
 DestinationPath="$HOME/InstallFiles"
 InstallerPath="$DestinationPath/AgentBootstrapper"
